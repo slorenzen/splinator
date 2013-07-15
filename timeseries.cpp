@@ -5,7 +5,15 @@
 #include <cstdlib>
 #include <sstream>
 #include <math.h>
-#include <gsl/gsl_linalg.h>
+#include <gsl/gsl_blas.h>
+#include <gsl/gsl_multimin.h>
+
+const double TimeSeries::phi_start  = 2*M_PI;
+const double TimeSeries::alpha_start=-.4;
+const int    TimeSeries::giveUpTime = 10; // give up after 10 seconds
+const double TimeSeries::stepSize   =  0.01;
+const double TimeSeries::tolerance  =  0.01;
+const int    TimeSeries::maxIter = 100;
 
 TimeSeries::TimeSeries()
 {
@@ -17,15 +25,70 @@ TimeSeries::TimeSeries()
 	resizeVectors();
 	getBendParameters();
 	getBendPenaltyMatrix();
-
-	_lambda = 1;
-	for (int i = 0; i < 10; i++)
+	_lambda = .05;
+	for (int i = 0; i < 25; i++)
 	{
-		getCompleteMatrix();
-		getSolutionVectors();
-		solveSpline();
+ 		getCompleteMatrix();
+ 		//getSolutionVectors();
+ 		//solveSpline();
+ 		//writeFiles();
+// 	solve(y, spline);    // do this here since lambda wil not be changed
+// 		static gsl_vector *dummy=gsl_vector_alloc(2);
+//  		for (_phi=5.5; _phi<7; _phi+=.05) fdf(phi(), _alpha, dummy);
+		fit_constLambda();
+		//writeFiles();
 		_lambda *= 2;
 	}
+}
+
+void TimeSeries::test() // at lambda about -1.98, -.51, -.17 and .42, matrix is singular!!!
+{
+	double a_data[] = { 0.18, 0.60, 0.57, 0.96,
+	                    0.41, 0.24, 0.99, 0.58,
+	                    0.14, 0.30, 0.97, 0.66,
+	                    0.51, 0.13, 0.19, 0.85 };
+	double b_data[] = { 1.0, 2.0, 3.0, 4.0 };
+	gsl_matrix_view m = gsl_matrix_view_array (a_data, 4, 4);
+	gsl_vector_view b = gsl_vector_view_array (b_data, 4);
+	int s;
+	gsl_matrix *A = gsl_matrix_alloc(4,4);
+	gsl_vector *x = gsl_vector_alloc (4);
+	gsl_permutation * p = gsl_permutation_alloc (4);
+	gsl_matrix *inverse = gsl_matrix_alloc(4,4);
+	gsl_matrix *inv2 = gsl_matrix_alloc(4,4);
+	//for (int lambda = -190; lambda < -53; lambda++)
+	//for (int lambda = -50; lambda < -18; lambda++)
+	for (int lambdaI = -16; lambdaI < 41; lambdaI++)
+	{
+		const double lambda = .01*lambdaI;
+		gsl_matrix_memcpy(A, &m.matrix);
+		for (int i = 0; i < 4; i++) gsl_matrix_set(A, i, i, gsl_matrix_get(A, i, i)+lambda);
+		gsl_linalg_LU_decomp (A, p, &s);
+		gsl_linalg_LU_invert(A, p, inverse);
+		gsl_matrix_memcpy(inv2, inverse);
+		gsl_blas_dgemm (CblasNoTrans, CblasNoTrans, 1, inverse, inverse, 0, inv2);
+		if (true) // print inverse and d(inv)
+		{
+			cout << lambda;
+			for (int i = 0; i < 4; i++)for (int k = 0; k < 4; k++) cout << "\t" << gsl_matrix_get(inverse, i, k);
+			for (int i = 0; i < 4; i++)for (int k = 0; k < 4; k++) cout << "\t" << gsl_matrix_get(inv2, i, k);
+			cout << endl;
+		}
+		if (false) // solve eqn system
+		{
+			double det = gsl_linalg_LU_det(A, s);
+			gsl_blas_dgemv (CblasNoTrans, 1, inverse, &b.vector, 0, x);
+			cout << lambda << "\t" << det;
+			for (int i = 0; i < 4; i++) cout << "\t" << gsl_vector_get(x, i);
+			gsl_linalg_LU_solve(A, p, &b.vector, x);
+			for (int i = 0; i < 4; i++) cout << "\t" << gsl_vector_get(x, i); cout << endl;
+		}
+	}
+	gsl_permutation_free (p);
+	gsl_matrix_free(A);
+	gsl_vector_free (x);
+	gsl_matrix_free(inverse);
+	gsl_matrix_free(inv2);
 }
 
 TimeSeries::~TimeSeries()
@@ -51,23 +114,20 @@ void TimeSeries::loadDummyFile()
 		getline(ss, tStr, '\t'); // first data set
 		y.push_back(atof(tStr.c_str()));
 	}
-	for (int i = 0; i < length(); i++) cout << x[i] << "\t"; cout << endl;
-	for (int i = 0; i < length(); i++) cout << y[i] << "\t"; cout << endl;
 }
 
 void TimeSeries::resizeVectors()
 {
-	ecos.resize(length());
-	esin.resize(length());
-	y_y. resize(length());
-	y_c. resize(length());
-	y_s. resize(length());
-	yView    = gsl_vector_view_array (y.   data(), length());
-	ecosView = gsl_vector_view_array (ecos.data(), length());
-	esinView = gsl_vector_view_array (esin.data(), length());
-	yyView   = gsl_vector_view_array (y_y. data(), length());
-	ycView   = gsl_vector_view_array (y_c. data(), length());
-	ysView   = gsl_vector_view_array (y_s. data(), length());
+	spline.resize(length());
+	trend. resize(length());
+	ecos.  resize(length());
+	esin.  resize(length());
+	ecost. resize(length());
+	esint. resize(length());
+	y_c.   resize(length());
+	y_s.   resize(length());
+	y_ct.  resize(length());
+	y_st.  resize(length());
 	if (bendMat != NULL) gsl_matrix_free(bendMat);
 	if (mat     != NULL) gsl_matrix_free(mat);
 	if (per     != NULL) gsl_permutation_free(per);
@@ -107,8 +167,7 @@ void TimeSeries::getBendPenaltyMatrix()
 void TimeSeries::getCompleteMatrix()
 {
 	gsl_matrix_memcpy(mat, bendMat);
-	gsl_matrix_scale(mat, lambda());
-	for (int i = 0; i < length(); i++) *gsl_matrix_ptr(mat, i, i) += 1;
+	for (int i = 0; i < length(); i++) *gsl_matrix_ptr(mat, i, i) += lambda();
 	int signum;
 	gsl_linalg_LU_decomp (mat, per, &signum);
 }
@@ -123,11 +182,132 @@ void TimeSeries::getSolutionVectors()
 		const double e = exp(alpha()*x[tNr]);
 		ecos[tNr] = e*c;
 		esin[tNr] = e*s;
+		ecost[tNr]=ecos[tNr]*x[tNr];
+		esint[tNr]=esin[tNr]*x[tNr];
 	}
+}
+
+void TimeSeries::fit_constLambda() //resizeVectors(), getBendParameters(), getBendPenaltyMatrix() must have been done before!
+{
+	getCompleteMatrix(); // do this here since lambda wil not be changed
+	solve(y, spline);    // do this here since lambda wil not be changed
+	_iter = 0;
+	const gsl_multimin_fdfminimizer_type *T = gsl_multimin_fdfminimizer_vector_bfgs2;
+	gsl_multimin_fdfminimizer *m = gsl_multimin_fdfminimizer_alloc (T, 2);
+	gsl_vector *x= gsl_vector_alloc (2);
+	gsl_vector_set (x, 0, phi_start);
+	gsl_vector_set (x, 1, alpha_start); 
+	gsl_multimin_function_fdf func;
+	func.n = 2;  /* number of function components */
+	func.f = &f_constLambda;
+	func.df = &df_constLambda;
+	func.fdf = &fdf_constLambda;
+	func.params = (void *)this;
+	gsl_multimin_fdfminimizer_set (m, &func, x, stepSize, tolerance);
+	time_t t0 = time(0);
+	time_t t1 = t0;
+	do
+	{
+		_iter++;
+		_status = gsl_multimin_fdfminimizer_iterate (m);
+		if (status()) break;
+		_status = gsl_multimin_test_gradient (m->gradient, 1);
+		t1 = time(0);
+	}
+	while (status() == GSL_CONTINUE && (t1-t0) < giveUpTime && iter() < maxIter);
+	gsl_multimin_fdfminimizer_free(m);
+	gsl_vector_free(x);
+	cout << lambda() << "\t" << phi() << "\t" << alpha() << "\t" << m->f << endl;
+	writeFiles();
+}
+
+
+double TimeSeries::fdf(const double Phi, const double Alpha, gsl_vector* df)
+{
+	_phi=Phi;
+	_alpha=Alpha;
+	//getCompleteMatrix(); NOT NECESSARY SINCE LAMBDA CONSTANT
+	getSolutionVectors();
+	//solve(y, spline);    NOT NECESSARY SINCE LAMBDA CONSTANT
+	solve(ecos, y_c);
+	solve(esin, y_s);
+	solve(ecost, y_ct);
+	solve(esint, y_st);
+	double yy_rmsd = 0;
+	double yc_rmsd = 0; double yct_rmsd = 0;
+	double ys_rmsd = 0; double yst_rmsd = 0;
+	double cc_rmsd = 0; double cct_rmsd = 0;
+	double sc_rmsd = 0; double sct_rmsd = 0; double cst_rmsd = 0;
+	double ss_rmsd = 0; double sst_rmsd = 0;
+	// rmsd stuff
+	for (int i = 0; i < length(); i++)
+	{
+		double Y = spline[i]-y[i]; 
+		double S = esin[i]-y_s[i]; double ST = esint[i]-y_st[i];
+		double C = ecos[i]-y_c[i]; double CT = ecost[i]-y_ct[i];
+		yy_rmsd += Y*Y;
+		yc_rmsd += Y*C; yct_rmsd += Y*CT; 
+		ys_rmsd += Y*S; yst_rmsd += Y*ST;
+		cc_rmsd += C*C; cct_rmsd += C*CT;
+		sc_rmsd += S*C; sct_rmsd += S*CT; cst_rmsd += C*ST;
+		ss_rmsd += S*S; sst_rmsd += S*ST;
+	}
+	// bend stuff
+	double yy_bend = 0;
+	double yc_bend = 0; double yct_bend = 0;
+	double ys_bend = 0; double yst_bend = 0;
+	double cc_bend = 0; double cct_bend = 0;
+	double sc_bend = 0; double sct_bend = 0; double cst_bend = 0;
+	double ss_bend = 0; double sst_bend = 0;
+	for (int i = 1; i < length()-1; i++)
+	{
+		double Y  = bendParam[i][0]*spline[i-1]+bendParam[i][1]*spline[i]+bendParam[i][2]*spline[i+1];
+		double S  = bendParam[i][0]*y_s[i-1]+bendParam[i][1]*y_s[i]+bendParam[i][2]*y_s[i+1];
+		double C  = bendParam[i][0]*y_c[i-1]+bendParam[i][1]*y_c[i]+bendParam[i][2]*y_c[i+1];
+		double ST = bendParam[i][0]*y_st[i-1]+bendParam[i][1]*y_st[i]+bendParam[i][2]*y_st[i+1];
+		double CT = bendParam[i][0]*y_ct[i-1]+bendParam[i][1]*y_ct[i]+bendParam[i][2]*y_ct[i+1];
+		yy_bend += Y*Y;
+		yc_bend -= Y*C; yct_bend -= Y*CT;
+		ys_bend -= Y*S; yst_bend -= Y*ST;
+		cc_bend += C*C; cct_bend += C*CT;
+		sc_bend += S*C; sct_bend += S*CT; cst_bend += C*ST;
+		ss_bend += S*S; sst_bend += S*ST;
+	}
+	
+	const double yy = yy_rmsd + yy_bend/lambda();
+	const double yc = yc_rmsd + yc_bend/lambda();
+	const double ys = ys_rmsd + ys_bend/lambda();
+	const double cc = cc_rmsd + cc_bend/lambda();
+	const double sc = sc_rmsd + sc_bend/lambda();
+	const double ss = ss_rmsd + ss_bend/lambda();
+	const double yct = yct_rmsd + yct_bend/lambda();
+	const double yst = yst_rmsd + yst_bend/lambda();
+	const double cct = cct_rmsd + cct_bend/lambda();
+	const double sct = sct_rmsd + sct_bend/lambda();
+	const double cst = cst_rmsd + cst_bend/lambda();
+	const double sst = sst_rmsd + sst_bend/lambda();
+	
+	//const double err = yy - (cc*ys*ys          - 2*sc*yc*ys                     + ss*yc*yc)          / (cc*ss       -sc*sc);
+	double nom   = cc*ys*ys - 2*sc*yc*ys + ss*yc*yc;
+	double halfnom_p = (cc*ys*yct-cst*ys*ys) - (cct*yc*ys-sst*yc*ys-sc*yst*ys+sc*yc*yct) + (sct*yc*yc-ss*yc*yst);
+	double den   = cc*ss       -sc*sc;
+	double halfden_p = (cc*sct-ss*cst)-(sc*cct-sc*sst);
+	double halfnom_a = (cct*ys*ys+cc*yst*ys) - (sct*yc*ys + cst*yc*ys + sc*yct*ys + sc*yc*yst) + (sst*yc*yc+ss*yc*yct);
+	double halfden_a = (cct*ss+cc*sst) - (sc*sct+sc*cst);
+	double err = yy-nom/den;
+	double err_a = -2*(halfnom_a*den-nom*halfden_a)/(den*den);
+	double err_p = -2*(halfnom_p*den-nom*halfden_p)/(den*den);
+	err /= yy;
+	err_a /= yy;
+	err_p /= yy;
+	gsl_vector_set(df,0,err_p);
+	gsl_vector_set(df,1,err_a);
+	return err;
 }
 
 Params TimeSeries::getParams()
 {
+	double yy_rmsd = 0;
 	double yc_rmsd = 0;
 	double ys_rmsd = 0;
 	double cc_rmsd = 0;
@@ -136,9 +316,10 @@ Params TimeSeries::getParams()
 	// rmsd stuff
 	for (int i = 0; i < length(); i++)
 	{
-		double Y = y   [i]-y_y[i];
+		double Y = spline[i]-y[i];
 		double S = esin[i]-y_s[i];
 		double C = ecos[i]-y_c[i];
+		yy_rmsd += Y*Y;
 		yc_rmsd += Y*C;
 		ys_rmsd += Y*S;
 		cc_rmsd += C*C;
@@ -146,6 +327,7 @@ Params TimeSeries::getParams()
 		ss_rmsd += S*S;
 	}
 	// bend stuff
+	double yy_bend = 0;
 	double yc_bend = 0;
 	double ys_bend = 0;
 	double cc_bend = 0;
@@ -153,57 +335,84 @@ Params TimeSeries::getParams()
 	double ss_bend = 0;
 	for (int i = 1; i < length()-1; i++)
 	{
-		double Y = bendParam[i][0]*y_y[i-1]+bendParam[i][1]*y_y[i]+bendParam[i][2]*y_y[i+1];
+		double Y = bendParam[i][0]*spline[i-1]+bendParam[i][1]*spline[i]+bendParam[i][2]*spline[i+1];
 		double S = bendParam[i][0]*y_s[i-1]+bendParam[i][1]*y_s[i]+bendParam[i][2]*y_s[i+1];
 		double C = bendParam[i][0]*y_c[i-1]+bendParam[i][1]*y_c[i]+bendParam[i][2]*y_c[i+1];
-		yc_bend += Y*C;
-		ys_bend += Y*S;
+		yy_bend += Y*Y;
+		yc_bend -= Y*C;
+		ys_bend -= Y*S;
 		cc_bend += C*C;
 		sc_bend += S*C;
 		ss_bend += S*S;
 	}
 	return Params(
-		yc_rmsd + lambda()*yc_bend, 
-		ys_rmsd + lambda()*ys_bend,
-		cc_rmsd + lambda()*cc_bend, 
-		sc_rmsd + lambda()*sc_bend,
-		ss_rmsd + lambda()*ss_bend);
+		yy_rmsd + yy_bend/lambda(), 
+		yc_rmsd + yc_bend/lambda(), 
+		ys_rmsd + ys_bend/lambda(),
+		cc_rmsd + cc_bend/lambda(), 
+		sc_rmsd + sc_bend/lambda(),
+		ss_rmsd + ss_bend/lambda());
 }
+
 
 void TimeSeries::solveSpline()
 {
-	gsl_linalg_LU_solve (mat, per, &yView.   vector, &yyView.vector);
-	gsl_linalg_LU_solve (mat, per, &ecosView.vector, &ycView.vector);
-	gsl_linalg_LU_solve (mat, per, &esinView.vector, &ysView.vector);
-
-	// y_y contains spline fit WITHOUT oscillation now
-	for (int i = 0; i < length(); i++) cout << y_y[i] << "\t"; cout << endl;
-	//
-	// get amp, theta
-	//
+	// get pure spline
+	solve(y, spline);
+	// get trend spline
+	solve(ecos, y_c);
+	solve(esin, y_s);
 	Params p = getParams();
 	_theta = atan2(p.sc*p.yc-p.cc*p.ys, p.sc*p.ys-p.ss*p.yc);
-	cerr << "theta = " << theta() << endl;
 	const double C = cos(theta());
 	const double S = sin(theta());
-	_A = (C*p.yc+S*p.ys) / (C*C*p.cc+2*S*C*p.sc+S*S*p.ss);
-	cerr << "A = " << A() << endl;
-	Params dP = getdParams();
+	_A = -(C*p.yc+S*p.ys) / (C*C*p.cc+2*S*C*p.sc+S*S*p.ss);
+	for (int i = 0; i < length(); i++) trend[i] = spline[i]-A()*C*y_c[i]-A()*S*y_s[i];
 	//
 	//
 	//
-	vector<double> curve;
-	double err;
-	// output calculated spline, calculated cos
-	curve = y_y;
-	for (int i = 0; i < length(); i++) curve[i] -= A()*C*y_c[i]+A()*S*y_s[i];
-	for (int i = 0; i < length(); i++) cout << curve[i] << "\t"; cout << endl;
-	const double err2 = lambda()*bendPenalty(curve);
-	for (int i = 0; i < length(); i++) curve[i] += A()*C*exp(alpha()*x[i])*cos(phi()*x[i])+A()*S*exp(alpha()*x[i])*sin(phi()*x[i]);
-	for (int i = 0; i < length(); i++) cout << curve[i] << "\t"; cout << endl;
-	const double err1 = fitDist(curve);
-	cerr << A() << "\t" << err1 << "\t" << err2 << "\t" << err1+err2 << endl;
-	exit(-1);
+	// control output
+	double err = p.yy + A()*A()*C*C*p.cc + A()*A()*S*S*p.ss + 2*A()*C*p.yc + 2*A()*S*p.ys + 2*A()*A()*S*C*p.sc;
+	double nom = C*p.yc+S*p.ys;
+	nom *= nom;
+	double den = C*C*p.cc + S*S*p.ss + 2*S*C*p.sc;
+	double err2 = p.yy - nom/den;
+	double err3 = p.yy - (p.cc*p.ys*p.ys - 2*p.sc*p.yc*p.ys + p.ss*p.yc*p.yc) / (p.cc*p.ss-p.sc*p.sc);
+	cout << p.yy << "\t" << err << "\t" << err2 << "\t" << err3 << endl;
+}
+
+void TimeSeries::writeFiles()
+{
+	static bool firstCall = true;
+	if (firstCall) 
+	{
+		remove("spline.csv");
+		remove("trend.csv");
+		remove("param.csv");
+		remove("fit.csv");
+		firstCall = false;
+	}
+	std::ofstream file;
+	
+	file.open("spline.csv", std::ios_base::app);
+	for (int i = 0; i < length(); i++) file << spline[i] << "\t"; file << endl;
+	file.close();
+	
+	file.open("trend.csv", std::ios_base::app);
+	for (int i = 0; i < length(); i++) file << trend[i] << "\t"; file << endl;
+	file.close();
+	
+	vector<double> fit = trend;
+	for (int i = 0; i < length(); i++) fit[i] += A()*exp(alpha()*x[i])*cos(phi()*x[i]-theta());
+	
+	file.open("fit.csv", std::ios_base::app);
+	for (int i = 0; i < length(); i++) file << fit[i] << "\t"; file << endl;
+	file.close();
+	
+	
+	file.open("param.csv", std::ios_base::app);
+	file << lambda() << "\t" << A() << "\t" << alpha() << "\t" << phi() << "\t" << theta() << "\t" << bendPenalty(spline) << "\t" << rmsd(spline) << "\t" << bendPenalty(trend) << "\t" << rmsd(fit) << endl;
+	file.close();
 }
 
 double TimeSeries::bendPenalty(const vector<double> &curve)
@@ -217,7 +426,7 @@ double TimeSeries::bendPenalty(const vector<double> &curve)
 	return err;
 }
 
-double TimeSeries::fitDist(const std::vector< double >& curve)
+double TimeSeries::rmsd(const std::vector< double >& curve)
 {
 	double err = 0;
 	for (int i = 0; i < length(); i++) 
