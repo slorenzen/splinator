@@ -8,13 +8,6 @@
 
 using namespace std;
 
-class Params
-{
-public:
-	Params(double YY, double YC, double YS, double CC, double SC, double SS) : yy(YY), yc(YC),ys(YS),cc(CC),sc(SC),ss(SS){}
-	const double yy, yc, ys, cc, sc, ss;
-};
-
 class TimeSeries
 {
 
@@ -64,9 +57,6 @@ private:
 	void getBendPenaltyMatrix(); // depends only on x
 	void getCompleteMatrix();    // depends on x and lambda
 	void getSolutionVectors();   // depends on x, alpha, phi
-	Params getParams();
-	Params getdParams();
-	void solveSpline();
 	void writeFiles();
 	void getPhiAlpha();
 	double bendPenalty(const vector<double> &curve);
@@ -75,6 +65,7 @@ private:
 	vector<double> y; // original data
 	vector<double> spline; // spline when not using oscillations
 	vector<double> trend;  // spline when using oscillations
+	vector<double> fit;    // complete fit
 	vector<double> ecos, esin, ecost, esint; // exp(ax)*cos(x)  neeced for calculations
 	vector<double> y_c, y_s, y_ct, y_st;
 	vector<vector<double> > bendParam;
