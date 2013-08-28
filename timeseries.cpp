@@ -51,7 +51,7 @@ TimeSeries::TimeSeries()
 	getBendParameters();
 	getBendPenaltyMatrix();
 	_lambda = .05;
-	cout << "lambda\tphi\talpha\terr\tA\ttheta\tbendSpline\trmsSpline\tbendTrend\trmsFit" << endl;
+	cout << "lambda\tphi\talpha\terr\tA\ttheta\tbendSpline\trmsSpline\tbendTrend\trmsTrend\trmsFit" << endl;
 	for (int i = 0; i < 25; i++)
 	{
  		getCompleteMatrix();
@@ -261,7 +261,7 @@ void TimeSeries::fit_constLambda() //resizeVectors(), getBendParameters(), getBe
 		trend[i] = spline[i]-A()*(C*y_c[i] +S*y_s[i]);
 		fit[i]   = trend[i] +A()*(C*ecos[i]+S*esin[i]);
 	}
-	cout << lambda() << "\t" << phi() << "\t" << alpha() << "\t" << m->f << "\t" << A() << "\t" << theta() << "\t" << bendSpline << "\t" << rmsSpline << "\t" << bendTrend << "\t" << rmsFit << endl;
+	cout << lambda() << "\t" << phi() << "\t" << alpha() << "\t" << m->f << "\t" << A() << "\t" << theta() << "\t" << bendSpline << "\t" << rmsSpline << "\t" << bendTrend << "\t" << rmsd(trend) << "\t" << rmsFit << endl;
 	const double errControl1 = (rmsFit+bendTrend/lambda()) / (rmsSpline+bendSpline/lambda());
 	const double errControl2 = (rmsd(fit)+bendPenalty(trend)/lambda()) / (rmsd(spline)+bendPenalty(spline)/lambda());
 	cerr << bendSpline-bendPenalty(spline) << "\t" << rmsSpline-rmsd(spline) << "\t" << bendTrend-bendPenalty(trend) << "\t" << rmsFit-rmsd(fit) << "\t" << m->f-errControl1 << "\t" << m->f-errControl2 << endl;
